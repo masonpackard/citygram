@@ -1,5 +1,6 @@
 require 'app/services/connection_builder'
 require 'app/services/publisher_update'
+require 'pony'
 
 module Citygram::Workers
   class PublisherPoll
@@ -34,6 +35,12 @@ module Citygram::Workers
       end
     end
 
+    sidekiq_retries_exhausted do |msg|
+      Sidekiq.logger.warn "Failed #{msg['class']} with #{msg['args']}: #{msg['error_message']}"
+      # send message to the publisher owner / contact
+      notify_publisher_contact(publisher)
+    end
+
     private
 
     def valid_next_page?(next_page, current_page)
@@ -43,6 +50,33 @@ module Citygram::Workers
       current_page = URI.parse(current_page)
 
       next_page.host == current_page.host
+    end
+
+    def notify_publisher_contact(publisher_info)
+      Pony.options = {
+        from: ENV.fetch('SMTP_FROM_ADDRESS'),
+        via: :smtp,
+        via_options: {
+          enable_starttls_auto: true,
+          authentication: :plain,
+          address:        ENV.fetch('SMTP_ADDRESS'),
+          port:           ENV.fetch('SMTP_PORT'),
+          user_name:      ENV.fetch('SMTP_USER_NAME'),
+          password:       ENV.fetch('SMTP_PASSWORD'),
+          domain:         ENV.fetch('SMTP_DOMAIN'),
+        }
+      }
+
+      body = "Notification Error.<hr>
+              Citygram has unsuccessfully tried to connect to your endpoint. <br>
+              Description: #{publisher_info.description}. <br>
+              Endpoint: #{publisher_info.endpoint}."
+
+      Pony.mail(
+        to: publisher_info.email, # TODO: need to add an email contact to the publisher endpoint.
+        subject: "Citygram publisher - endpoint error notification",
+        html_body: body,
+      )
     end
   end
 end
